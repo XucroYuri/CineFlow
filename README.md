@@ -1,94 +1,96 @@
-# 🌊 CineFlow (影流) - 通用视频生成流水线
+# 🌊 CineFlow - Universal Video Generation Pipeline
 
 [![Python](https://img.shields.io/badge/Python-3.10%7C3.11%7C3.12-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Active_Development-brightgreen)]()
 
-**CineFlow (影流)** 是一个企业级的通用视频生成流水线后端程序。它专为**高并发**、**大规模分镜任务**设计，提供从脚本解析、资产管理到自动化生成的完整解决方案。
+[**中文文档 (Chinese Docs)**](README_zh.md)
 
-本项目旨在成为视频生成领域的 "Airflow" 或 "TensorFlow"，通过统一的接口聚合 Sora, Veo, Wan 等前沿模型，实现工业级的影像生产流程。
+**CineFlow** is an enterprise-grade backend pipeline for universal video generation. Designed for **high concurrency** and **large-scale storyboard tasks**, it provides a complete solution from script parsing and asset management to automated generation.
 
----
-
-## ⚠️ 服务说明 (Disclaimer)
-
-**当前版本核心驱动：[Sora.hk](https://www.sora.hk/) API**
-
-> 本项目目前主要基于第三方服务商 Sora.hk 提供的 API 开发，并非 OpenAI 官方直连服务。虽然接口格式兼容 NewAPI 标准，但在模型参数（如 `is_pro`）、计费策略和网络连接性上存在差异。请在生产环境中使用前仔细阅读服务商文档。
+This project aims to be the "Airflow" or "TensorFlow" of video generation, aggregating cutting-edge models like Sora, Veo, and Wan through a unified interface to achieve industrial-grade video production workflows.
 
 ---
 
-## 🏗 系统架构 (Architecture)
+## ⚠️ Disclaimer
+
+**Core Driver: [Sora.hk](https://www.sora.hk/) API**
+
+> This project is currently primarily based on the API provided by the third-party service provider Sora.hk, and is NOT a direct service from OpenAI. While the interface format is compatible with the NewAPI standard, there are differences in model parameters (e.g., `is_pro`), billing strategies, and network connectivity. Please read the service provider's documentation carefully before using it in a production environment.
+
+---
+
+## 🏗 Architecture
 
 ```mermaid
-graph LR
-    Input[分镜脚本 JSON/MD] --> Scanner[递归扫描器]
-    Scanner --> Interactor[交互式预处理]
-    Interactor --> Controller[自适应并发控制器]
+graph TD
+    Input[Storyboard JSON/MD] --> Scanner[Recursive Scanner]
+    Scanner --> Interactor[Interactive Pre-processor]
+    Interactor --> Controller[Adaptive Concurrency Controller]
     
     subgraph CineFlow Pipeline
-        Controller --> Worker1[任务线程 1]
-        Controller --> Worker2[任务线程 2]
-        Controller --> WorkerN[任务线程 N]
+        Controller --> Worker1[Worker Thread 1]
+        Controller --> Worker2[Worker Thread 2]
+        Controller --> WorkerN[Worker Thread N]
         
-        Worker1 --> API[多模型 API 网关]
-        API --> Polling[智能轮询 & 熔断]
+        Worker1 --> API[Multi-Model API Gateway]
+        API --> Polling[Smart Polling & Circuit Breaker]
     end
     
-    Polling --> Downloader[原子化下载器]
-    Downloader --> Output[标准化素材库]
+    Polling --> Downloader[Atomic Downloader]
+    Downloader --> Output[Standardized Asset Library]
 ```
 
 ---
 
-## ✨ 核心特性 (Features)
+## ✨ Key Features
 
-### 🛡️ 工业级稳定性
-*   **自适应熔断 (Circuit Breaker)**: 默认 **20 并发**。遇 API 波动（429/5xx）自动降级至 **安全模式（5 并发）**，并执行指数级冷却恢复策略。
-*   **防惊群 (Jitter)**: 任务启动引入微秒级随机抖动，平滑网络尖峰。
-*   **原子写入**: 采用 `.tmp` 过渡写入机制，配合磁盘空间检测，杜绝文件损坏。
+### 🛡️ Industrial Stability
+*   **Adaptive Circuit Breaker**: Defaults to **20 concurrent tasks**. Automatically downgrades to **Safe Mode (5 tasks)** upon API fluctuations (429/5xx) and executes an exponential cooling recovery strategy.
+*   **Jitter Protection**: Introduces microsecond-level random jitter at task startup to smooth out network spikes.
+*   **Atomic Writes**: Uses a `.tmp` transition writing mechanism combined with disk space detection to prevent file corruption.
 
-### ⚡️ 高效流程
-*   **断点续传**: 智能跳过已生成的完整文件，节省宝贵的 API 额度。
-*   **长时任务优化**: 针对 Pro 模型（生成耗时 >10分钟）优化的长轮询策略，支持最长 **35 分钟** 等待。
-*   **交互式向导**: 内置 CLI 向导，支持**角色 ID 注入**、**分辨率统一覆盖**等预处理操作。
+### ⚡️ Efficient Workflow
+*   **Resumable Generation**: Intelligently skips completed files to save valuable API quotas.
+*   **Long-Running Task Optimization**: Long-polling strategy optimized for Pro models (generation time > 10 mins), supporting up to **35 minutes** of wait time.
+*   **Interactive Wizard**: Built-in CLI wizard supporting **Character ID injection**, **Resolution override**, and other pre-processing operations.
 
-### 🔧 开发者友好
-*   **全链路追踪**: 记录 Request ID，便于故障排查。
-*   **日志脱敏**: 自动过滤 API Key 等敏感信息，保障开源安全。
-*   **多平台支持**: 提供 macOS/Linux (`.sh`) 和 Windows (`.bat`) 一键启动脚本。
-
----
-
-## 🗺️ 路线图 (Roadmap)
-
-### 🚀 Phase 1: 基础夯实 (Current)
-- [x] Sora.hk 接口深度适配
-- [x] 多线程并发与熔断机制
-- [x] 分镜脚本标准化与自动补全
-- [x] 交互式 CLI 向导
-
-### 🛠️ Phase 2: 多模态扩展 (Next)
-- [ ] **多服务商接入**: 适配 [贞贞的AI工坊](https://ai.t8star.cn) 和 [推理时代](https://aihubmix.com)。
-- [ ] **多模型聚合**: 支持 Nano Banana Pro, Grok Imagine, Veo 3.1, Wan 2.6。
-- [ ] **本地资产上云**: 集成图床工具，自动处理本地 `image_url` 上传。
-- [ ] **多参考图矩阵**: 自动拼接“角色+场景”矩阵图，突破单参考图限制。
-
-### 🤖 Phase 3: 智能化与 GUI (Future)
-- [ ] **LLM 编剧助理**: 输入小说/剧本，自动拆解为标准化 JSON 分镜（集成 LLM）。
-- [ ] **CineFlow Studio**: 跨平台 GUI 客户端 (Electron/Flutter)，提供可视化编排。
+### 🔧 Developer Friendly
+*   **Full Traceability**: Records Request IDs for easy troubleshooting.
+*   **Log Sanitization**: Automatically filters sensitive information like API Keys to ensure open-source security.
+*   **Multi-Platform Support**: Provides one-click startup scripts for macOS/Linux (`.sh`) and Windows (`.bat`).
 
 ---
 
-## 🛠️ 安装与使用 (Installation)
+## 🗺️ Roadmap
 
-### 前置要求
-*   **Python 3.10+** (推荐 3.10 或 3.11 以获得最佳稳定性)
+### 🚀 Phase 1: Foundation (Current)
+- [x] Deep adaptation for Sora.hk interface
+- [x] Multi-threaded concurrency & circuit breaker mechanism
+- [x] Storyboard standardization & auto-completion
+- [x] Interactive CLI Wizard
+
+### 🛠️ Phase 2: Multi-Modal Expansion (Next)
+- [ ] **Multi-Provider Support**: Adapt for [T8Star AI](https://ai.t8star.cn) and [AIHubMix](https://aihubmix.com).
+- [ ] **Multi-Model Aggregation**: Support Nano Banana Pro, Grok Imagine, Veo 3.1, Wan 2.6.
+- [ ] **Cloud Asset Management**: Integrate image hosting tools for automatic local `image_url` uploading.
+- [ ] **Multi-Reference Matrix**: Auto-stitch "Character + Scene" matrix images to overcome single reference limits.
+
+### 🤖 Phase 3: Intelligence & GUI (Future)
+- [ ] **LLM Script Assistant**: Auto-decompose novels/scripts into standardized JSON storyboards (LLM integration).
+- [ ] **CineFlow Studio**: Cross-platform GUI client (Electron/Flutter) for visual orchestration.
+
+---
+
+## 🛠️ Installation & Usage
+
+### Prerequisites
+*   **Python 3.10+** (3.10 or 3.11 recommended for best stability)
 *   Git
 
-### 方式一：极简启动 (推荐)
+### Option 1: Quick Start (Recommended)
 
-无需手动配置环境，脚本会自动创建虚拟环境 (venv) 并安装依赖。
+No manual environment configuration needed. The script automatically creates a virtual environment (venv) and installs dependencies.
 
 **macOS / Linux:**
 ```bash
@@ -98,88 +100,88 @@ cd CineFlow
 ```
 
 **Windows:**
-直接双击运行目录下的 `start_win.bat`。
+Double-click `start_win.bat` in the directory.
 
-### 方式二：开发者手动安装
+### Option 2: Manual Installation
 
-如果您习惯使用 Conda 或手动管理 venv：
+If you prefer Conda or managing venv manually:
 
 ```bash
-# 1. 克隆项目
+# 1. Clone repository
 git clone https://github.com/XucroYuri/CineFlow.git
 cd CineFlow
 
-# 2. 创建并激活虚拟环境 (建议)
+# 2. Create and activate venv (Recommended)
 python3 -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 3. 安装依赖
+# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
 ---
 
-## ⚙️ 配置指南 (Configuration)
+## ⚙️ Configuration
 
-1.  复制配置模板：
+1.  Copy the configuration template:
     ```bash
     cp .env.example .env
     ```
-2.  编辑 `.env` 文件，填入您的 API Key：
+2.  Edit `.env` and enter your API Key:
     ```ini
     SORA_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
-    # 可选：配置代理
+    # Optional: Proxy
     # HTTP_PROXY=http://127.0.0.1:10808
     ```
 
 ---
 
-## 🚀 进阶用法 (Advanced Usage)
+## 🚀 Advanced Usage
 
-### 1. 交互式向导 (Wizard Mode)
-直接运行程序即可进入全功能向导，引导您完成从输入选择到输出配置的全过程：
+### 1. Wizard Mode
+Run the program directly to enter the full-featured wizard, guiding you from input selection to output configuration:
 ```bash
 python main.py
 ```
 
-### 2. 空跑估价 (Dry Run)
-在不消耗任何额度的情况下，检查分镜格式并估算成本：
+### 2. Dry Run
+Check storyboard formats and estimate costs without consuming any quota:
 ```bash
 python main.py --dry-run
 ```
 
-### 3. 原位生产模式
-将生成的视频直接保存在 Markdown/JSON 文件同级的 `_assets` 目录下，便于 Obsidian 等笔记软件管理：
+### 3. In-Place Production
+Save generated videos directly to an `_assets` directory alongside the source Markdown/JSON files, facilitating management in tools like Obsidian:
 ```bash
 python main.py --input-dir "/Your/Obsidian/Vault/Project" --output-mode in_place
 ```
 
 ---
 
-## 📂 目录结构
+## 📂 Directory Structure
 
 ```text
 CineFlow/
-├── input/                  # 默认输入区 (含标准模板)
-├── output/                 # 默认输出区
+├── input/                  # Default Input Area (Includes Templates)
+├── output/                 # Default Output Area
 ├── src/
-│   ├── api_client.py       # API 网关 (连接池/重试)
-│   ├── concurrency.py      # 自适应并发控制器
-│   ├── worker.py           # 任务流水线逻辑
-│   ├── interactor.py       # CLI 交互模块
-│   └── normalize_script.py # 数据标准化脚本
-├── main.py                 # 程序入口
-├── start_mac.sh            # macOS/Linux 启动脚本
-└── start_win.bat           # Windows 启动脚本
+│   ├── api_client.py       # API Gateway (Connection Pool/Retry)
+│   ├── concurrency.py      # Adaptive Concurrency Controller
+│   ├── worker.py           # Task Pipeline Logic
+│   ├── interactor.py       # CLI Interaction Module
+│   └── normalize_script.py # Data Normalization Script
+├── main.py                 # Entry Point
+├── start_mac.sh            # macOS/Linux Startup Script
+└── start_win.bat           # Windows Startup Script
 ```
 
-## 🤝 贡献 (Contributing)
+## 🤝 Contributing
 
-欢迎提交 Issue 和 Pull Request！
-在提交代码前，请确保：
-1.  运行 `python main.py --dry-run` 测试无误。
-2.  不要提交包含真实 API Key 的 `.env` 文件。
+Issues and Pull Requests are welcome!
+Before submitting code, please ensure:
+1.  Run `python main.py --dry-run` to verify no errors.
+2.  Do NOT submit `.env` files containing real API Keys.
 
 ## 📝 License
 
-本项目采用 [MIT License](LICENSE) 开源。
+This project is licensed under the [MIT License](LICENSE).
