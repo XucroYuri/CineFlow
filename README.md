@@ -6,7 +6,7 @@
 
 [**中文文档 (Chinese Docs)**](README_zh.md)
 
-**CineFlow** is a specialized tool designed to automate and manage large-scale video generation tasks. It provides a structured pipeline for aggregating various video generation APIs (such as Sora, Veo, and Wan), ensuring stability and efficiency in batch production environments.
+**CineFlow** is a specialized tool designed to automate and manage large-scale video generation tasks. It provides a structured pipeline for interacting with video generation APIs, ensuring stability and efficiency in batch production environments.
 
 By focusing on error handling, concurrency control, and asset management, CineFlow helps creators and developers move from manual one-off generations to reliable, automated workflows.
 
