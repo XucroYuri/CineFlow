@@ -1,5 +1,6 @@
-import re
 from typing import List, Optional, Literal
+from collections import Counter
+import re
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
@@ -78,47 +79,164 @@ def interactive_resolution_override(tasks: List[GenerationTask]):
 
 def interactive_asset_injection(tasks: List[GenerationTask]):
     """
-    Interactively asks user to supply IDs for characters found in prompts.
+    Interactive workflow to inject Character IDs.
+    Scans ONLY explicit names defined in JSON asset.characters.
+    Handles existing IDs by allowing overwrite or skip.
     """
     console.print(Panel("🕵️  角色 ID 注入检查 (Character ID Injection)", style="cyan"))
     
-    all_prompts = [t.segment.prompt_text for t in tasks]
-    
-    console.print("此步骤用于检测 Prompt 中的中文角色名，并补充官方 Character ID。")
-    if not Confirm.ask("是否进入角色 ID 修正/补充流程? [dim](可选)[/dim]"):
+    console.print("此步骤将扫描 JSON 中已定义的角色名称，并辅助您补充或修正官方 ID。")
+    if not Confirm.ask("是否开始扫描并修正?", default=True):
         return
 
-    console.print("[dim]提示: 角色 ID (Character ID) 应与 Sora 官方创建且公开使用的 ID 保持一致。[/dim]")
+    # --- Phase 1: Scan & Analyze ---
+    with console.status("[bold green]正在分析 JSON 资产...[/bold green]"):
+        file_char_map = {}  # {file_name: Counter(char_name: count)}
+        global_char_stats = {} # {char_name: {'files': set(), 'count': 0, 'existing_ids': set()}}
 
-    while True:
-        name = Prompt.ask("请输入角色中文名称 (输入 q 结束)")
-        if name.lower() == 'q':
-            break
-        
-        count = sum(1 for p in all_prompts if name in p)
-        if count == 0:
-            console.print(f"[yellow]未在 Prompt 中找到角色 '{name}'[/yellow]")
-            continue
+        for task in tasks:
+            f_name = task.source_file.name
+            if f_name not in file_char_map:
+                file_char_map[f_name] = Counter()
             
-        char_id = Prompt.ask(f"请输入 '{name}' 的角色ID [dim](需与 Sora 官方公开 ID 一致，直接回车可跳过)[/dim]", default="")
-        if not char_id:
-            continue
-            
-        formatted_id = f" (@{char_id} )" 
-        
-        replaced_count = 0
-        for t in tasks:
-            if name in t.segment.prompt_text:
-                pattern = fr"{re.escape(name)}(?!\s*[（\(]@)"
-                new_prompt = re.sub(pattern, f"{name}{formatted_id}", t.segment.prompt_text)
+            for char_str in task.segment.asset.characters:
+                # Robust parsing of "Name", "Name@ID", "Name (@ID )"
+                name, found_id = _parse_name_and_id(char_str)
                 
-                if new_prompt != t.segment.prompt_text:
-                    t.segment.prompt_text = new_prompt
-                    replaced_count += 1
-                    full_char_str = f"{name} @{char_id}"
-                    if t.segment.asset and full_char_str not in t.segment.asset.characters:
-                        t.segment.asset.characters.append(full_char_str)
+                if name:
+                    file_char_map[f_name][name] += 1
+                    
+                    if name not in global_char_stats:
+                        global_char_stats[name] = {'files': set(), 'count': 0, 'existing_ids': set()}
+                    
+                    global_char_stats[name]['files'].add(f_name)
+                    global_char_stats[name]['count'] += 1
+                    if found_id:
+                        global_char_stats[name]['existing_ids'].add(found_id)
 
-        console.print(f"[green]已在 {replaced_count} 个 Prompt 中注入了 ID。[/green]")
+    if not global_char_stats:
+        console.print("[yellow]未在 JSON 文件的 Asset -> Characters 中找到任何角色定义。[/yellow]")
+        return
+
+    # --- Phase 2: Report ---
+    console.print("\n[bold]📄 待处理角色列表 (Characters from JSON):[/bold]")
+    for f_name, counter in file_char_map.items():
+        if not counter:
+            continue
+        chars_list = [f"{k}" for k, v in counter.items()]
+        console.print(f" • [cyan]{f_name}[/cyan]: {', '.join(chars_list)}")
+
+    # --- Phase 3: Interactive Injection ---
+    sorted_candidates = sorted(global_char_stats.items(), key=lambda x: x[1]['count'], reverse=True)
+    
+    console.print("\n[bold]🚀 开始 ID 补充流程[/bold]")
+    console.print("操作指南: 输入新 ID 回车覆盖。直接 [bold]回车[/bold] 则保持当前状态(跳过)。输入 'q' 结束。")
+    
+    for name, stats in sorted_candidates:
+        existing_ids = stats['existing_ids']
+        existing_str = ", ".join(existing_ids) if existing_ids else "[dim]无[/dim]"
+        status_color = "green" if existing_ids else "yellow"
+        
+        console.print(f"\n角色名称: [bold white]{name}[/bold white] (涉及 {stats['count']} 个分镜)")
+        console.print(f"[dim]所在文件: {', '.join(list(stats['files'])[:3])}{'...' if len(stats['files'])>3 else ''}[/dim]")
+        console.print(f"当前 ID: [{status_color}]{existing_str}[/{status_color}]")
+        
+        prompt_text = f"请输入 '{name}' 的新 ID" if existing_ids else f"请输入 '{name}' 的 ID"
+        char_id = Prompt.ask(prompt_text, default="")
+        
+        if char_id.lower() == 'q':
+            break
+            
+        if char_id.strip():
+            # User provided an ID, apply injection/replacement
+            clean_id = char_id.strip()
+            _apply_id_injection(tasks, name, clean_id)
+        else:
+            console.print("[dim]⏭ 保持原状 (跳过)[/dim]")
 
     console.print("[dim]角色 ID 注入完成。[/dim]\n")
+
+def _parse_name_and_id(char_str: str):
+    """
+    Extracts name and ID from various formats:
+    - "Alice" -> ("Alice", None)
+    - "Alice@123" -> ("Alice", "123")
+    - "Alice (@123 )" -> ("Alice", "123")
+    """
+    if '@' not in char_str:
+        return char_str.strip(), None
+    
+    # Split by first @
+    # But wait, "Name (@ID)" split '@' gives "Name (" and "ID)"
+    # "Name@ID" split '@' gives "Name" and "ID"
+    
+    # Try regex for the cleaner "Name (@ID)" pattern first
+    match_paren = re.search(r'^(.*?)\s*\(@([^)]+)\)\s*$', char_str)
+    if match_paren:
+        name = match_paren.group(1).strip()
+        raw_id = match_paren.group(2).strip()
+        # raw_id might be "123 " or "123"
+        return name, raw_id
+    
+    # Fallback to simple split for "Name@ID"
+    parts = char_str.split('@')
+    name = parts[0].strip()
+    raw_id = parts[1].strip()
+    return name, raw_id
+
+def _apply_id_injection(tasks: List[GenerationTask], name: str, char_id: str):
+    """
+    Helper to apply ID injection. 
+    1. Updates Prompt to: Name (@ID )
+    2. Updates Asset to: Name@ID (Standardized)
+    """
+    # Prompt format: Name (@ID ) with trailing space for safety
+    prompt_id_suffix = f" (@{char_id} )"
+    # Asset format: Name@ID (also adding space just in case, per user request for general foolproofing)
+    asset_id_str = f"{name}@{char_id} " 
+    
+    replaced_count = 0
+    
+    for t in tasks:
+        # 1. Update Prompt Text
+        if name in t.segment.prompt_text:
+            # We need to replace any existing ID format for this name
+            # Pattern: Name followed optionally by (@...) or nothing
+            # Actually, standard replacement:
+            # Find "Name" that is NOT part of an existing correct tag? 
+            # Or just replace occurrences.
+            
+            # Simple approach: Replace "Name" + any old tag -> "Name" + new tag
+            # Old tag patterns: " (@old )", "(@old)", etc.
+            
+            # Regex to find: Name followed by optional existing tag
+            # existing tag = \s*\(@[^)]+\)
+            pattern = fr"{re.escape(name)}(\s*\(@[^)]+\))?"
+            
+            # Replacement
+            new_prompt = re.sub(pattern, f"{name}{prompt_id_suffix}", t.segment.prompt_text)
+            
+            if new_prompt != t.segment.prompt_text:
+                t.segment.prompt_text = new_prompt
+                replaced_count += 1
+                
+        # 2. Update Asset metadata
+        # We need to find the entry for 'name' in the list and update it
+        new_char_list = []
+        updated_asset = False
+        for c in t.segment.asset.characters:
+            c_name, _ = _parse_name_and_id(c)
+            if c_name == name:
+                new_char_list.append(asset_id_str)
+                updated_asset = True
+            else:
+                new_char_list.append(c)
+        
+        if updated_asset:
+            t.segment.asset.characters = new_char_list
+
+    if replaced_count > 0:
+        console.print(f" -> [green]已更新 {replaced_count} 处 Prompt (ID: {char_id})。[/green]")
+    else:
+        # If we didn't update prompt (maybe name not in text), but we updated asset list
+        console.print(f" -> [green]已更新关联资产定义 (ID: {char_id})。[/green]")

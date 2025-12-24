@@ -36,4 +36,4 @@ fi
 
 # Run
 echo "[INFO] Starting Application..."
-python main.py "$@"
+"$PYTHON_CMD" main.py "$@"

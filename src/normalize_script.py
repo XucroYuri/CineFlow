@@ -22,10 +22,24 @@ def extract_json_from_md(content):
             json_str = match.group(0)
             
     if json_str:
-        # Fix unescaped quotes in style tags
-        json_str = re.sub(r'in_the_style_of_"([^"]+)"', r"in_the_style_of_'\1'", json_str)
-    
+        # Fix 1: Specific known issue 'in_the_style_of_"..."'
+        json_str = re.sub(r'in_the_style_of_"([^"]+?)"', r"in_the_style_of_'\1'", json_str)
+        # Fix 3: Remove trailing commas
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+        
     return json_str
+
+def enforce_character_id_format(text):
+    if not text:
+        return ""
+    # 1. Ensure space BEFORE @id
+    text = re.sub(r'(?<!\s)(@\w+)', r' \1', text)
+    # 2. Ensure space AFTER @id (Always add space)
+    # Note: This is simpler and avoids regex backtracking issues with lookaheads
+    text = re.sub(r'(@\w+)', r'\1 ', text)
+    # 3. Collapse multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def extract_asset_info(prompt_text):
     asset = {
@@ -40,39 +54,38 @@ def extract_asset_info(prompt_text):
     if scene_match:
         asset["scene"] = scene_match.group(1).strip()
 
-    char_matches = re.findall(r'([\u4e00-\u9fa5]+)\s*(@[a-zA-Z0-9_]+)', prompt_text)
-    for name, char_id in char_matches:
-        full_char = f"{name} {char_id}"
+    matches = re.findall(r'([\u4e00-\u9fa5a-zA-Z0-9]+)\s+(@\w+)', prompt_text)
+    for name, char_id in matches:
+        clean_id = char_id.strip()
+        full_char = f"{name} {clean_id}"
         if full_char not in asset["characters"]:
             asset["characters"].append(full_char)
             
     return asset
 
 def normalize_segment(segment):
-    prompt = segment.get("prompt_text", "")
-    extracted_asset = extract_asset_info(prompt)
+    raw_prompt = segment.get("prompt_text", "")
+    clean_prompt = enforce_character_id_format(raw_prompt)
+    extracted_asset = extract_asset_info(clean_prompt)
     
-    # Merge asset
     existing_asset = segment.get("asset", {})
     if not existing_asset:
         existing_asset = extracted_asset
     else:
-        # Ensure keys exist
         for k in ["characters", "scene", "props"]:
             if k not in existing_asset:
                 existing_asset[k] = [] if k != "scene" else None
         
         if not existing_asset.get("scene") and extracted_asset["scene"]:
             existing_asset["scene"] = extracted_asset["scene"]
-        if not existing_asset.get("characters") and extracted_asset["characters"]:
-            # Append missing
-            for c in extracted_asset["characters"]:
-                if c not in existing_asset["characters"]:
-                    existing_asset["characters"].append(c)
+        
+        for c in extracted_asset["characters"]:
+            if c not in existing_asset["characters"]:
+                existing_asset["characters"].append(c)
 
     new_seg = {
         "segment_index": segment.get("segment_index"),
-        "prompt_text": prompt,
+        "prompt_text": clean_prompt,
         "image_url": segment.get("image_url", TEMPLATE_FIELDS["image_url"]),
         "asset": existing_asset,
         "duration_seconds": segment.get("duration_seconds", TEMPLATE_FIELDS["duration_seconds"]),
@@ -82,56 +95,60 @@ def normalize_segment(segment):
     }
     return new_seg
 
-def process_file(file_path: Path):
+def process_directory_from_md(md_path: Path):
+    print(f"Processing: {md_path.name}")
     try:
-        # Determine if source is MD or JSON
-        if file_path.suffix == '.md':
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            json_str = extract_json_from_md(content)
-            if not json_str:
-                return
+        with open(md_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        json_str = extract_json_from_md(content)
+        if not json_str:
+            print(f"  [WARN] No JSON block found")
+            return
+
+        try:
             data = json.loads(json_str)
-            clean_name = file_path.stem.replace("[分镜-", "").replace("]", "")
-            output_name = f"storyboard_{clean_name}.json"
-            output_path = file_path.parent / output_name
-            
-        elif file_path.suffix == '.json':
-            # Re-normalize existing JSON
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            output_path = file_path
-            
+        except json.JSONDecodeError as e:
+            print(f"  [DEBUG] JSON Load Failed: {e}. Attempting aggressive fix...")
+            json_str_fixed = json_str.replace('in_the_style_of_"KAI XIN CHUI CHUI"', "in_the_style_of_'KAI XIN CHUI CHUI'")
+            try:
+                data = json.loads(json_str_fixed)
+                print("  [OK] Aggressive fix worked.")
+            except:
+                print(f"  [ERROR] Aggressive fix failed.")
+                return
+
         if "segments" not in data:
             return
 
         normalized_segments = [normalize_segment(seg) for seg in data["segments"]]
         
         new_data = {
-            "_comment": f"Standardized via normalize_script",
+            "_comment": f"Standardized from {md_path.name}",
             "segments": normalized_segments
         }
+
+        clean_name = md_path.stem.replace("[分镜-", "").replace("]", "")
+        output_name = f"storyboard_{clean_name}.json"
+        output_path = md_path.parent / output_name
 
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, indent=2, ensure_ascii=False)
             
-        print(f"[OK] Normalized: {output_path}")
+        print(f"  [OK] Saved to: {output_path}")
 
     except Exception as e:
-        print(f"[ERROR] {file_path.name}: {e}")
+        print(f"  [ERROR] Failed: {e}")
 
 def main():
     if not SOURCE_ROOT.exists():
-        print(f"Source root not found: {SOURCE_ROOT}")
         return
     
-    print(f"Scanning and Normalizing {SOURCE_ROOT}...")
-    # Process both MD source and existing JSON to ensure alignment
+    print(f"Scanning {SOURCE_ROOT}...")
     for root, dirs, files in os.walk(SOURCE_ROOT):
         for file in files:
-            if file.startswith("storyboard_") and file.endswith(".json"):
-                process_file(Path(root) / file)
-            # Optional: re-generate from MD if needed, but JSON is now source of truth if exists
+            if file.startswith("[分镜-") and file.endswith(".md"):
+                process_directory_from_md(Path(root) / file)
 
 if __name__ == "__main__":
     main()
