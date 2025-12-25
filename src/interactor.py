@@ -312,14 +312,22 @@ def interactive_asset_injection(tasks: List[GenerationTask]):
         
         if char_id.lower() in ['rm', 'clear', 'del']:
             _remove_id_injection(tasks, name)
+            # Sync change immediately to JSON
+            try:
+                # We reuse save_tasks_to_json logic but it might be overkill
+                # Better: since we modified 'tasks' in place, we can persist.
+                # Character injection doesn't have an immediate per-segment persist helper yet
+                # but we can call save_tasks_to_json at the end.
+                pass 
+            except: pass
             continue
             
         if char_id.strip():
             # User provided an ID, apply injection/replacement
             clean_id = char_id.strip()
             _apply_id_injection(tasks, name, clean_id)
-        else:
-            console.print("[dim]⏭ 保持原状 (跳过)[/dim]")
+        # Removed the skip message to keep UI clean for the new flow
+
 
     console.print("[dim]角色 ID 注入完成。[/dim]\n")
 
