@@ -142,22 +142,22 @@ def validate_and_fix_image_urls(tasks: List[GenerationTask]):
         if url:
             original_url = url
             # 1. Aggressive Clean: Strip whitespace and surrounding parentheses
-            # This handles cases like "(https://...)" or "  https://...  "
-            url = url.strip().strip('()')
+            # Chain strip calls to handle cases like "(\nhttps://...)" where stripping parens exposes new whitespace
+            url = url.strip().strip('()').strip()
             
             # 2. Check Valid URL (Basic Schema Check)
             if not url.startswith(("http://", "https://")):
-                # Try to see if it's just missing schema?
-                # If it looks like a domain, maybe prepend https?
-                # For now, just warn but maybe don't delete if we want to be very lenient?
-                # But without schema, downstream tools usually fail. 
-                # Let's just log a warning and KEEP it, allowing user to manually fix if they want,
-                # OR delete if it's clearly garbage. 
-                # Current decision: Mark as None because the downloader WILL fail.
-                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 无效 URL (缺少 http/https)，已移除[/yellow]: {url}")
-                seg.image_url = None
-                invalid_count += 1
-                continue
+                # Fallback: Regex extraction
+                # Search for http(s) pattern inside the string (ignoring leading garbage)
+                match = re.search(r'(https?://[^\s"\'<>)]+)', url)
+                if match:
+                    url = match.group(1)
+                    # console.print(f"[green]🔧 Segment {seg.segment_index}: 从杂乱文本中提取有效链接[/green]")
+                else:
+                    console.print(f"[yellow]⚠ Segment {seg.segment_index}: 无效 URL (缺少 http/https)，已移除[/yellow]: {repr(url)}")
+                    seg.image_url = None
+                    invalid_count += 1
+                    continue
 
             if url != original_url:
                 seg.image_url = url
@@ -264,9 +264,10 @@ def interactive_asset_injection(tasks: List[GenerationTask]):
             if f_name not in file_char_map:
                 file_char_map[f_name] = Counter()
             
-            for char_str in task.segment.asset.characters:
-                # Robust parsing of "Name", "Name@ID", "Name (@ID )"
-                name, found_id = _parse_name_and_id(char_str)
+            # Scan CharacterItem objects
+            for char_item in task.segment.asset.characters:
+                name = char_item.name.strip()
+                found_id = char_item.id
                 
                 if name:
                     file_char_map[f_name][name] += 1
@@ -337,45 +338,51 @@ def interactive_asset_injection(tasks: List[GenerationTask]):
 def _remove_id_injection(tasks: List[GenerationTask], name: str):
     """
     Helper to remove ID injection.
-    1. Reverts Prompt to: Name
-    2. Reverts Asset to: Name
+    1. Reverts Prompt: Replaces '@ID' with 'Name'.
+    2. Reverts Asset: Sets char_item.id = None.
     """
     replaced_count = 0
     
+    # We need to know what ID to look for to remove it from prompt.
+    target_id = None
+    
+    # Find the ID currently assigned to this name (first match)
     for t in tasks:
-        # 1. Update Prompt Text
-        # Find "Name (@ID )" or "Name (@ID)"
-        # Regex: Name followed by optional existing tag (\s*\(@[^)]+\))
-        # We replace the whole match with just "Name"
-        pattern = fr"{re.escape(name)}\s*\(@[^)]+\)"
-        if re.search(pattern, t.segment.prompt_text):
-            new_prompt = re.sub(pattern, name, t.segment.prompt_text)
+        for char_item in t.segment.asset.characters:
+            if char_item.name == name and char_item.id:
+                target_id = char_item.id
+                break
+        if target_id: break
+    
+    if not target_id:
+        console.print(f" -> [dim]该角色当前未绑定 ID，仅清除元数据。[/dim]")
+        return
+
+    # Now replace @ID with Name in prompts
+    # Pattern: @ID (with optional trailing space)
+    # We replace it with Name + space
+    pattern = re.escape(target_id) + r'\s*'
+    
+    for t in tasks:
+        # 1. Update Prompt
+        if target_id in t.segment.prompt_text:
+            new_prompt = re.sub(pattern, name + " ", t.segment.prompt_text)
+            # Cleanup spaces
+            new_prompt = re.sub(r'\s+', ' ', new_prompt)
+            
             if new_prompt != t.segment.prompt_text:
                 t.segment.prompt_text = new_prompt
                 replaced_count += 1
                 
         # 2. Update Asset metadata
-        new_char_list = []
-        updated_asset = False
-        for c in t.segment.asset.characters:
-            c_name, _ = _parse_name_and_id(c)
-            if c_name == name:
-                # If currently has ID (e.g. Name@ID), revert to Name
-                if c != name:
-                    new_char_list.append(name)
-                    updated_asset = True
-                else:
-                    new_char_list.append(c)
-            else:
-                new_char_list.append(c)
-        
-        if updated_asset:
-            t.segment.asset.characters = new_char_list
+        for char_item in t.segment.asset.characters:
+            if char_item.name == name:
+                char_item.id = None
 
-    if replaced_count > 0 or updated_asset:
-        console.print(f" -> [yellow]已移除 {name} 的 ID 绑定 ({replaced_count} 处 Prompt 更新)。[/yellow]")
+    if replaced_count > 0:
+        console.print(f" -> [yellow]已移除 {name} 的 ID ({target_id}) 绑定 ({replaced_count} 处 Prompt 更新)。[/yellow]")
     else:
-        console.print(f" -> [dim]未发现需要移除的 ID 绑定。[/dim]")
+        console.print(f" -> [yellow]已移除关联资产定义。[/yellow]")
 
 def interactive_image_injection(tasks: List[GenerationTask]):
     """
@@ -560,87 +567,52 @@ def save_tasks_to_json(tasks: List[GenerationTask]):
     else:
         console.print("[dim]没有文件需要更新。[/dim]\n")
 
-def _parse_name_and_id(char_str: str):
-    """
-    Extracts name and ID from various formats:
-    - "Alice" -> ("Alice", None)
-    - "Alice@123" -> ("Alice", "123")
-    - "Alice (@123 )" -> ("Alice", "123")
-    """
-    if '@' not in char_str:
-        return char_str.strip(), None
-    
-    # Split by first @
-    # But wait, "Name (@ID)" split '@' gives "Name (" and "ID)"
-    # "Name@ID" split '@' gives "Name" and "ID"
-    
-    # Try regex for the cleaner "Name (@ID)" pattern first
-    match_paren = re.search(r'^(.*?)\s*\(@([^)]+)\)\s*$', char_str)
-    if match_paren:
-        name = match_paren.group(1).strip()
-        raw_id = match_paren.group(2).strip()
-        # raw_id might be "123 " or "123"
-        return name, raw_id
-    
-    # Fallback to simple split for "Name@ID"
-    parts = char_str.split('@')
-    name = parts[0].strip()
-    raw_id = parts[1].strip()
-    return name, raw_id
+
 
 def _apply_id_injection(tasks: List[GenerationTask], name: str, char_id: str):
     """
     Helper to apply ID injection. 
-    1. Updates Prompt to: Name (@ID )
-    2. Updates Asset to: Name@ID (Standardized)
+    1. Updates Prompt: Replaces 'Name' with '@ID ' (EXCEPT in quotes).
+    2. Updates Asset: Sets char_item.id = char_id.
     """
-    # Prompt format: Name (@ID ) with trailing space for safety
-    prompt_id_suffix = f" (@{char_id} )"
-    # Asset format: Name@ID (also adding space just in case, per user request for general foolproofing)
-    asset_id_str = f"{name}@{char_id} " 
+    # Replacement string: ID + space
+    replacement = f"{char_id} " 
     
     replaced_count = 0
     
+    # Regex to match Name BUT ignore quotes (CN/EN)
+    # Pattern groups:
+    # 1. Double quotes content: "[^"]*"
+    # 2. CN quotes content: “[^”]*”
+    # 3. The Name itself (to be replaced)
+    pattern = r'("[^"]*"|“[^”]*”)|(' + re.escape(name) + r')'
+    
+    def repl(m):
+        # If group 1 (quotes) matches, return it unchanged
+        if m.group(1):
+            return m.group(1)
+        # Else replace group 2 (Name)
+        return replacement
+
     for t in tasks:
         # 1. Update Prompt Text
+        # Perform replacement
         if name in t.segment.prompt_text:
-            # We need to replace any existing ID format for this name
-            # Pattern: Name followed optionally by (@...) or nothing
-            # Actually, standard replacement:
-            # Find "Name" that is NOT part of an existing correct tag? 
-            # Or just replace occurrences.
+            new_prompt = re.sub(pattern, repl, t.segment.prompt_text)
             
-            # Simple approach: Replace "Name" + any old tag -> "Name" + new tag
-            # Old tag patterns: " (@old )", "(@old)", etc.
-            
-            # Regex to find: Name followed by optional existing tag
-            # existing tag = \s*\(@[^)]+\)
-            pattern = fr"{re.escape(name)}(\s*\(@[^)]+\))?"
-            
-            # Replacement
-            new_prompt = re.sub(pattern, f"{name}{prompt_id_suffix}", t.segment.prompt_text)
+            # Clean up potential double spaces introduced by replacement
+            new_prompt = re.sub(r'\s+', ' ', new_prompt)
             
             if new_prompt != t.segment.prompt_text:
                 t.segment.prompt_text = new_prompt
                 replaced_count += 1
                 
         # 2. Update Asset metadata
-        # We need to find the entry for 'name' in the list and update it
-        new_char_list = []
-        updated_asset = False
-        for c in t.segment.asset.characters:
-            c_name, _ = _parse_name_and_id(c)
-            if c_name == name:
-                new_char_list.append(asset_id_str)
-                updated_asset = True
-            else:
-                new_char_list.append(c)
-        
-        if updated_asset:
-            t.segment.asset.characters = new_char_list
+        for char_item in t.segment.asset.characters:
+            if char_item.name == name:
+                char_item.id = char_id
 
     if replaced_count > 0:
         console.print(f" -> [green]已更新 {replaced_count} 处 Prompt (ID: {char_id})。[/green]")
     else:
-        # If we didn't update prompt (maybe name not in text), but we updated asset list
         console.print(f" -> [green]已更新关联资产定义 (ID: {char_id}) 。[/green]")

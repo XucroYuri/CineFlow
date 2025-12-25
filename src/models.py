@@ -1,14 +1,58 @@
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Union, Any
 from pydantic import BaseModel, Field, model_validator
 from pathlib import Path
 from datetime import datetime
 import random
 import string
+import re
+
+class CharacterItem(BaseModel):
+    name: str
+    id: Optional[str] = None
+    
+    def __str__(self):
+        # Helper for legacy string representation logic if needed
+        return f"{self.name} {self.id}" if self.id else self.name
 
 class Asset(BaseModel):
-    characters: List[str] = Field(default_factory=list, description="List of character names or IDs")
+    characters: List[CharacterItem] = Field(default_factory=list, description="List of character objects")
     scene: Optional[str] = None
     props: List[str] = Field(default_factory=list, description="List of props")
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy_characters(cls, data: Any) -> Any:
+        """
+        Migrates legacy List[str] characters to List[CharacterItem].
+        Example: ["Alice@123"] -> [{"name": "Alice", "id": "@123"}]
+        """
+        if isinstance(data, dict):
+            chars = data.get('characters', [])
+            new_chars = []
+            if chars and isinstance(chars, list):
+                for item in chars:
+                    if isinstance(item, str):
+                        # Parse string format
+                        # Logic similar to _parse_name_and_id but simple here
+                        # Support "Name@ID" or "Name (@ID)"
+                        c_name = item
+                        c_id = None
+                        
+                        # Try finding ID pattern @...
+                        # Note: This simple migration assumes the format is somewhat standard
+                        if '@' in item:
+                            parts = item.split('@', 1)
+                            # Cleanup name part: remove trailing parens or spaces
+                            c_name = parts[0].strip().rstrip('(').strip()
+                            # ID part: ensure it starts with @
+                            c_id = '@' + parts[1].strip().rstrip(')')
+                        
+                        new_chars.append({'name': c_name, 'id': c_id})
+                    else:
+                        # Already dict or object
+                        new_chars.append(item)
+                data['characters'] = new_chars
+        return data
 
 class Segment(BaseModel):
     segment_index: int
