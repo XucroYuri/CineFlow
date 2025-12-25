@@ -97,13 +97,26 @@ class AssetManager:
         """
         Retrieves segment-specific reference images.
         
-        Naming Convention:
-        - Start Frame: {index}_start.png
-        - End Frame:   {index}_end.png
-        - Grid:        {index}_grid.png
+        Naming Convention Priority:
+        1. {index}_{type}.png          (e.g., 1_start.png)
+        2. segment-{index}_{type}.png  (e.g., segment-1_start.png)
+        3. segment-{index}.png         (e.g., segment-1.png) [Only if type='start']
+        4. {index}.png                 (e.g., 1.png)         [Only if type='start']
         """
-        filename_base = f"{segment_index}_{type}"
-        return self._find_image(self.subdirs["segment"], filename_base)
+        candidates = [
+            f"{segment_index}_{type}",
+            f"segment-{segment_index}_{type}"
+        ]
+        
+        if type == "start":
+            candidates.append(f"segment-{segment_index}")
+            candidates.append(f"{segment_index}")
+            
+        for base in candidates:
+            path = self._find_image(self.subdirs["segment"], base)
+            if path:
+                return path
+        return None
 
     def resolve_any_segment_ref(self, segment_index: int) -> Optional[Path]:
         """

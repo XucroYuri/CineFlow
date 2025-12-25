@@ -1,5 +1,6 @@
 import logging
 import os
+import hashlib
 from pathlib import Path
 from typing import Optional
 from qcloud_cos import CosConfig
@@ -29,6 +30,14 @@ class TencentCOSClient:
         else:
             logger.warning("Tencent COS credentials not fully configured. Image upload disabled.")
 
+    def _calculate_md5(self, file_path: Path) -> str:
+        """Helper to calculate file MD5"""
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
     def upload_file(self, file_path: Path, key: Optional[str] = None) -> Optional[str]:
         """
         Uploads a file to COS and returns the public URL.
@@ -43,10 +52,12 @@ class TencentCOSClient:
 
         # Determine object key
         if not key:
-            # Use relative path from project root or just filename with a prefix
-            # Let's try to keep it organized: cineflow_uploads/{filename}
-            # Or use MD5 hash to deduplicate? For now, simple filename.
-            key = f"cineflow_assets/{file_path.name}"
+            # Generate safe filename using MD5 hash to avoid Chinese characters and ensure uniqueness
+            file_hash = self._calculate_md5(file_path)
+            # Sanitize extension: only allow alphanumeric and dots
+            raw_ext = file_path.suffix.lower()
+            clean_ext = "".join(c for c in raw_ext if c.isalnum() or c == '.')
+            key = f"cineflow_assets/{file_hash}{clean_ext}"
         
         try:
             logger.info(f"Uploading {file_path} to COS as {key}...")
@@ -54,14 +65,13 @@ class TencentCOSClient:
                 Bucket=self.bucket,
                 LocalFilePath=str(file_path),
                 Key=key,
-                EnableMD5=False,
-                ProgressCallback=None
+                EnableMD5=False
             )
             
             # Construct URL
             if settings.COS_CUSTOM_DOMAIN:
-                # Assuming custom domain doesn't end with slash, key doesn't start with slash
-                domain = settings.COS_CUSTOM_DOMAIN.rstrip('/')
+                # Sanitize: remove trailing slash, whitespace, and any accidental parentheses
+                domain = settings.COS_CUSTOM_DOMAIN.strip().rstrip('/').strip('()')
                 url = f"{domain}/{key}"
             else:
                 # Standard URL: https://{Bucket}.cos.{Region}.myqcloud.com/{Key}

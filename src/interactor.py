@@ -191,45 +191,46 @@ def interactive_image_injection(tasks: List[GenerationTask]):
     processed_count = 0
     uploaded_count = 0
     
-    with console.status("[bold green]正在处理图片...[/bold green]"):
-        for (source_file, seg_idx), task in unique_segments.items():
-            asset_mgr = AssetManager(source_file)
+    for (source_file, seg_idx), task in unique_segments.items():
+        asset_mgr = AssetManager(source_file)
+        
+        # Look for start image (e.g., 1_start.png)
+        start_img_path = asset_mgr.get_segment_image(seg_idx, "start")
+        
+        if start_img_path:
+            console.print(f"\n[cyan]发现本地图片[/cyan]: {start_img_path.name} (Segment {seg_idx})")
             
-            # Look for start image (e.g., 1_start.png)
-            start_img_path = asset_mgr.get_segment_image(seg_idx, "start")
+            # Check existing URL
+            existing_url = task.segment.image_url
+            should_upload = True
             
-            if start_img_path:
-                console.print(f"\n[cyan]发现本地图片[/cyan]: {start_img_path.name} (Segment {seg_idx})")
-                
-                # Check existing URL
-                existing_url = task.segment.image_url
-                should_upload = True
-                
-                if existing_url:
-                    console.print(f"  [dim]当前 image_url: {existing_url}[/dim]")
-                    # If it looks like a COS URL we just uploaded, maybe skip?
-                    # For now, simplistic check: prompt user
-                    should_upload = Confirm.ask(f"  Segment {seg_idx} 已存在链接，是否上传本地图片并覆盖?", default=False)
-                
-                if should_upload:
-                    # Upload
+            if existing_url:
+                console.print(f"  [dim]当前 image_url: {existing_url}[/dim]")
+                # If it looks like a COS URL we just uploaded, maybe skip?
+                # For now, simplistic check: prompt user
+                should_upload = Confirm.ask(f"  Segment {seg_idx} 已存在链接，是否上传本地图片并覆盖?", default=False)
+            
+            if should_upload:
+                # Upload
+                with console.status(f"[green]正在上传 {start_img_path.name}...[/green]"):
                     url = cos_client.upload_file(start_img_path)
-                    if url:
-                        # Update all tasks sharing this segment
-                        # (Since they share the same Segment object instance usually, 
-                        # but let's be safe and iterate 'tasks' to match)
-                        
-                        # Note: In Python, if 'task.segment' references the same object, one update is enough.
-                        # We verify this in models.py logic, but typically scanner creates one Segment object per JSON entry.
-                        task.segment.image_url = url
-                        uploaded_count += 1
-                        console.print(f"  [green]✔ 更新成功:[/green] {url}")
-                    else:
-                        console.print(f"  [red]✘ 上传失败[/red]")
-                else:
-                    console.print("  [dim]⏭ 跳过[/dim]")
                     
-                processed_count += 1
+                if url:
+                    # Update all tasks sharing this segment
+                    # (Since they share the same Segment object instance usually, 
+                    # but let's be safe and iterate 'tasks' to match)
+                    
+                    # Note: In Python, if 'task.segment' references the same object, one update is enough.
+                    # We verify this in models.py logic, but typically scanner creates one Segment object per JSON entry.
+                    task.segment.image_url = url
+                    uploaded_count += 1
+                    console.print(f"  [green]✔ 更新成功:[/green] {url}")
+                else:
+                    console.print(f"  [red]✘ 上传失败[/red]")
+            else:
+                console.print("  [dim]⏭ 跳过[/dim]")
+                
+            processed_count += 1
 
     console.print(f"\n[bold]处理完成[/bold]: 扫描 {processed_count} 个本地资产，上传更新 {uploaded_count} 个。")
     console.print("[dim]注意: 更改已应用到内存，将在下一步保存到 JSON 文件。[/dim]\n")
