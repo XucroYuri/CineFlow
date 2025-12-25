@@ -26,7 +26,9 @@ from src.interactor import (
     show_task_summary, 
     interactive_resolution_override,
     interactive_image_injection,
-    save_tasks_to_json
+    save_tasks_to_json,
+    interactive_execution_config,
+    validate_and_fix_image_urls
 )
 
 # Setup Rich Console
@@ -100,11 +102,18 @@ def run_wizard_mode(args):
     # 2.3 Start Frame Injection (COS Upload)
     interactive_image_injection(tasks)
     
-    # 2.4 Save Changes
+    # 2.4 Validate Image URLs
+    validate_and_fix_image_urls(tasks)
+    
+    # 2.5 Save Changes (Persist all pre-processing)
     save_tasks_to_json(tasks)
     
-    # --- Step 3: Output Configuration ---
-    console.print("\n[bold cyan]3. 结果保存配置 (Output Configuration)[/bold cyan]")
+    # --- Step 3: Execution Configuration ---
+    # Configure count, concurrency, filter segments
+    tasks, gen_count, concurrency = interactive_execution_config(tasks)
+    
+    # --- Step 4: Output Configuration ---
+    console.print("\n[bold cyan]4. 结果保存配置 (Output Configuration)[/bold cyan]")
     
     output_mode = args.output_mode # Default from args
     
@@ -117,30 +126,21 @@ def run_wizard_mode(args):
     choice = Prompt.ask("请输入选项", choices=["1", "2"], default="1")
     if choice == "2":
         output_mode = "in_place"
-        # Re-run discovery to update output paths in tasks logic?
-        # Actually scanner.discover_tasks calculates output_dir. 
-        # So we need to RE-GENERATE task objects with new output mode
-        # BUT we must preserve prompt changes from Step 2.
-        # Solution: Update output_dir manually or Re-scan and Re-apply?
-        # Manual update is safer to keep injection.
-        
         console.print("[dim]正在更新任务输出路径...[/dim]")
-        # We need to mimic the logic in scanner.py for in_place
         for task in tasks:
-            # Re-calculate output dir
-            # {Source_Dir}/{Json_Filename}_assets/{Segment}
+            # Re-calculate output dir for the filtered/new tasks
             base_output_dir = task.source_file.parent / f"{task.source_file.stem}_assets"
             task.output_dir = base_output_dir / f"Segment_{task.segment.segment_index}"
     else:
         output_mode = "centralized"
-        # Tasks are already centralized by default scan
         
     console.print(f"已选择模式: [bold]{output_mode}[/bold]")
 
-    # --- Step 4: Final Confirmation ---
-    console.print("\n[bold cyan]4. 最终确认 (Final Review)[/bold cyan]")
+    # --- Step 5: Final Confirmation ---
+    console.print("\n[bold cyan]5. 最终确认 (Final Review)[/bold cyan]")
     console.print(f"即将开始处理 [bold]{len(tasks)}[/bold] 个任务。")
-    console.print(f"最大并发数: [bold]{settings.MAX_CONCURRENT_TASKS}[/bold]")
+    console.print(f"每分镜版本数: [bold]{gen_count}[/bold]")
+    console.print(f"最大并发数: [bold]{concurrency}[/bold]")
     
     if args.dry_run:
         console.print("[bold yellow]注意: 当前为空跑模式 (Dry Run)，不会真实扣费。[/bold yellow]")
@@ -149,8 +149,8 @@ def run_wizard_mode(args):
         console.print("[yellow]已取消操作。[/yellow]")
         sys.exit(0)
 
-    # Return configured tasks to main execution
-    return tasks
+    # Return configured tasks and concurrency
+    return tasks, concurrency
 
 def main():
     parser = argparse.ArgumentParser(description="Sora 视频批量生成工具")
@@ -172,10 +172,10 @@ def main():
         sys.exit(1)
 
     # Run Wizard
-    tasks = run_wizard_mode(args)
+    tasks, concurrency = run_wizard_mode(args)
 
-    # Initialize Controller
-    init_controller(settings.MAX_CONCURRENT_TASKS)
+    # Initialize Controller with user-selected concurrency
+    init_controller(concurrency)
     
     # Execution
     console.print("\n[bold green]=== 开始执行队列 ===[/bold green]")
@@ -197,7 +197,8 @@ def main():
             
             overall_task = progress.add_task("[green]总进度", total=len(tasks))
             
-            executor = ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_TASKS)
+            # Use the user-configured concurrency
+            executor = ThreadPoolExecutor(max_workers=concurrency)
             future_to_task = {
                 executor.submit(process_task, task, client, args.dry_run, args.force): task 
                 for task in tasks

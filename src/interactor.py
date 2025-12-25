@@ -1,5 +1,6 @@
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Tuple
 from collections import Counter
+from pathlib import Path
 import re
 import json
 from rich.console import Console
@@ -9,8 +10,166 @@ from rich.panel import Panel
 from .models import GenerationTask
 from .asset_manager import AssetManager
 from .storage import TencentCOSClient
+from .config import settings
 
 console = Console()
+
+def interactive_execution_config(tasks: List[GenerationTask]) -> Tuple[List[GenerationTask], int, int]:
+    """
+    Step 3: Configure execution parameters before starting.
+    Returns: (filtered_tasks, gen_count, concurrency)
+    """
+    console.print(Panel("⚙️  任务执行配置 (Task Execution Config)", style="cyan"))
+    
+    # 1. Generation Count per Segment
+    gen_count = int(Prompt.ask(
+        "每个分镜生成版本数量 (Versions per Segment)", 
+        default=str(settings.GEN_COUNT_PER_SEGMENT)
+    ))
+    
+    # 2. Concurrency
+    concurrency = int(Prompt.ask(
+        "最大并发任务数 (Max Concurrent Tasks)", 
+        default=str(settings.MAX_CONCURRENT_TASKS)
+    ))
+    
+    # 3. Segment Filter
+    # Extract available segment indices
+    all_indices = sorted(list(set(t.segment.segment_index for t in tasks)))
+    min_idx, max_idx = min(all_indices), max(all_indices)
+    
+    console.print(f"当前任务包含分镜范围: [bold]{min_idx} - {max_idx}[/bold] (共 {len(all_indices)} 个分镜)")
+    range_input = Prompt.ask(
+        "请输入要生成的分镜范围 (例如 '1-5, 8, 10' 或 'all')", 
+        default="all"
+    )
+    
+    # Filter Tasks
+    selected_indices = set()
+    if range_input.lower() == "all":
+        selected_indices = set(all_indices)
+    else:
+        # Parse range string
+        parts = range_input.split(',')
+        for part in parts:
+            part = part.strip()
+            if '-' in part:
+                try:
+                    start, end = map(int, part.split('-'))
+                    selected_indices.update(range(start, end + 1))
+                except ValueError:
+                    console.print(f"[red]忽略无效范围格式: {part}[/red]")
+            else:
+                try:
+                    selected_indices.add(int(part))
+                except ValueError:
+                    console.print(f"[red]忽略无效数字: {part}[/red]")
+    
+    # Filter original tasks list based on selected indices
+    # AND Adjust for the new gen_count (versions)
+    # We need to regenerate the tasks list because version count might change
+    
+    new_tasks = []
+    # Group by (source_file, segment_index) to avoid duplicates if input `tasks` already has multiple versions
+    # Actually, `tasks` input might already have v1, v2. We should pick unique segments and re-generate tasks.
+    
+    unique_segments = {} # (source_file, segment_index) -> Segment
+    for t in tasks:
+        key = (t.source_file, t.segment.segment_index)
+        if key not in unique_segments:
+            unique_segments[key] = t.segment
+            
+    # Re-create tasks
+    for (source_file, idx), segment in unique_segments.items():
+        if idx in selected_indices:
+            # Create N versions
+            # Output dir logic needs to be preserved or re-calculated.
+            # Assuming task.output_dir logic in scanner.py: segment_dir / ...
+            # We can re-use the logic or just grab it from one of the existing tasks
+            
+            # Simple way: find a prototype task for this segment to get output_dir base
+            # But output_dir in GenerationTask includes version? No, usually task.output_dir is segment dir?
+            # Let's check models.py or scanner.py
+            # scanner.py: task.output_dir = segment_dir
+            # models.py: output_filename_base uses version_index
+            
+            # We need to reconstruct the path. 
+            # scanner.py logic:
+            # if output_mode == "in_place": base = ...
+            # else: base = ...
+            
+            # To avoid duplicating logic, we can try to find an existing task for this segment and copy its output_dir
+            prototype_task = next((t for t in tasks if t.source_file == source_file and t.segment.segment_index == idx), None)
+            
+            if prototype_task:
+                base_dir = prototype_task.output_dir
+                for v in range(1, gen_count + 1):
+                     new_task = GenerationTask(
+                        id=f"{source_file.stem}_s{idx}_v{v}",
+                        source_file=source_file,
+                        segment=segment,
+                        version_index=v,
+                        output_dir=base_dir
+                    )
+                     new_tasks.append(new_task)
+
+    console.print(f"[green]已配置任务队列:[/green] {len(new_tasks)} 个任务 (分镜数: {len(selected_indices)}, 每分镜 {gen_count} 版本)")
+    
+    return new_tasks, gen_count, concurrency
+
+def validate_and_fix_image_urls(tasks: List[GenerationTask]):
+    """
+    Validates image_url in tasks.
+    1. Checks for HTTP/HTTPS prefix.
+    2. Strips whitespace.
+    3. Nullifies invalid URLs.
+    """
+    console.print(Panel("🔍  图片链接校验 (Image URL Validation)", style="cyan"))
+    
+    fixed_count = 0
+    invalid_count = 0
+    
+    # Iterate unique segments to avoid double counting/fixing
+    seen_segments = set()
+    
+    for t in tasks:
+        seg = t.segment
+        if id(seg) in seen_segments:
+            continue
+        seen_segments.add(id(seg))
+        
+        url = seg.image_url
+        if url:
+            original_url = url
+            # 1. Strip whitespace
+            url = url.strip()
+            
+            # 2. Check Valid URL
+            if not url.startswith(("http://", "https://")):
+                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 无效 URL (非 http/https)，已移除[/yellow]: {url}")
+                seg.image_url = None
+                invalid_count += 1
+                continue
+                
+            # 3. Check for specific bad patterns (e.g. trailing parenthesis from markdown)
+            # This handles the case where user manually entered a bad URL in JSON
+            if url.endswith(')'):
+                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 发现末尾多余括号，尝试修复[/yellow]: {url}")
+                url = url.rstrip(')')
+                
+            if url != original_url:
+                seg.image_url = url
+                fixed_count += 1
+                
+    if fixed_count > 0 or invalid_count > 0:
+        console.print(f"[green]校验完成: 修复 {fixed_count} 个链接, 移除 {invalid_count} 个无效链接。[/green]")
+        # We should save these fixes back to JSON
+        try:
+            save_tasks_to_json(tasks)
+        except:
+            pass
+    else:
+        console.print("[dim]所有图片链接格式正常。[/dim]")
 
 def show_task_summary(tasks: List[GenerationTask], input_dir: str):
     """
@@ -217,14 +376,16 @@ def interactive_image_injection(tasks: List[GenerationTask]):
                     
                 if url:
                     # Update all tasks sharing this segment
-                    # (Since they share the same Segment object instance usually, 
-                    # but let's be safe and iterate 'tasks' to match)
-                    
-                    # Note: In Python, if 'task.segment' references the same object, one update is enough.
-                    # We verify this in models.py logic, but typically scanner creates one Segment object per JSON entry.
                     task.segment.image_url = url
                     uploaded_count += 1
-                    console.print(f"  [green]✔ 更新成功:[/green] {url}")
+                    
+                    # IMMEDIATE PERSISTENCE
+                    # Save this change to the JSON file right now
+                    try:
+                        _persist_segment_change(task.source_file, task.segment)
+                        console.print(f"  [green]✔ 上传并保存成功:[/green] {url}")
+                    except Exception as e:
+                        console.print(f"  [red]⚠ 上传成功但保存JSON失败: {e}[/red]")
                 else:
                     console.print(f"  [red]✘ 上传失败[/red]")
             else:
@@ -233,7 +394,41 @@ def interactive_image_injection(tasks: List[GenerationTask]):
             processed_count += 1
 
     console.print(f"\n[bold]处理完成[/bold]: 扫描 {processed_count} 个本地资产，上传更新 {uploaded_count} 个。")
-    console.print("[dim]注意: 更改已应用到内存，将在下一步保存到 JSON 文件。[/dim]\n")
+    console.print("[dim]注意: 所有更改已实时写入 JSON 文件。[/dim]\n")
+
+def _persist_segment_change(source_file: Path, segment: Any):
+    """
+    Helper to save a single segment's changes to its source JSON file immediately.
+    """
+    with open(source_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    changed = False
+    for seg_dict in data.get("segments", []):
+        if seg_dict.get("segment_index") == segment.segment_index:
+            # Check and update fields
+            # We focus on image_url here, but might as well sync others if we have the object
+            if seg_dict.get("image_url") != segment.image_url:
+                seg_dict["image_url"] = segment.image_url
+                changed = True
+            
+            # Sync other potential changes (just in case)
+            if seg_dict.get("prompt_text") != segment.prompt_text:
+                seg_dict["prompt_text"] = segment.prompt_text
+                changed = True
+                
+            if seg_dict.get("asset") != segment.asset.model_dump():
+                seg_dict["asset"] = segment.asset.model_dump()
+                changed = True
+                
+            if seg_dict.get("resolution") != segment.resolution:
+                seg_dict["resolution"] = segment.resolution
+                changed = True
+            break
+            
+    if changed:
+        with open(source_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
 
 def save_tasks_to_json(tasks: List[GenerationTask]):
     """
