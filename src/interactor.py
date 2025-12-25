@@ -141,25 +141,28 @@ def validate_and_fix_image_urls(tasks: List[GenerationTask]):
         url = seg.image_url
         if url:
             original_url = url
-            # 1. Strip whitespace
-            url = url.strip()
+            # 1. Aggressive Clean: Strip whitespace and surrounding parentheses
+            # This handles cases like "(https://...)" or "  https://...  "
+            url = url.strip().strip('()')
             
-            # 2. Check Valid URL
+            # 2. Check Valid URL (Basic Schema Check)
             if not url.startswith(("http://", "https://")):
-                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 无效 URL (非 http/https)，已移除[/yellow]: {url}")
+                # Try to see if it's just missing schema?
+                # If it looks like a domain, maybe prepend https?
+                # For now, just warn but maybe don't delete if we want to be very lenient?
+                # But without schema, downstream tools usually fail. 
+                # Let's just log a warning and KEEP it, allowing user to manually fix if they want,
+                # OR delete if it's clearly garbage. 
+                # Current decision: Mark as None because the downloader WILL fail.
+                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 无效 URL (缺少 http/https)，已移除[/yellow]: {url}")
                 seg.image_url = None
                 invalid_count += 1
                 continue
-                
-            # 3. Check for specific bad patterns (e.g. trailing parenthesis from markdown)
-            # This handles the case where user manually entered a bad URL in JSON
-            if url.endswith(')'):
-                console.print(f"[yellow]⚠ Segment {seg.segment_index}: 发现末尾多余括号，尝试修复[/yellow]: {url}")
-                url = url.rstrip(')')
-                
+
             if url != original_url:
                 seg.image_url = url
                 fixed_count += 1
+                console.print(f"[green]🔧 Segment {seg.segment_index}: 自动修复 URL 格式[/green]")
                 
     if fixed_count > 0 or invalid_count > 0:
         console.print(f"[green]校验完成: 修复 {fixed_count} 个链接, 移除 {invalid_count} 个无效链接。[/green]")

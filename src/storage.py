@@ -70,8 +70,9 @@ class TencentCOSClient:
             
             # Construct URL
             if settings.COS_CUSTOM_DOMAIN:
-                # Sanitize: remove trailing slash, whitespace, and any accidental parentheses
-                domain = settings.COS_CUSTOM_DOMAIN.strip().rstrip('/').strip('()')
+                # Sanitize: remove trailing slash, whitespace, and ANY accidental parentheses
+                # We use replace to ensure they are gone even if quotes or other chars are present
+                domain = settings.COS_CUSTOM_DOMAIN.replace('(', '').replace(')', '').strip().rstrip('/')
                 url = f"{domain}/{key}"
             else:
                 # Standard URL: https://{Bucket}.cos.{Region}.myqcloud.com/{Key}
