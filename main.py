@@ -21,7 +21,13 @@ from src.api_client import SoraClient
 from src.worker import process_task
 from src.models import GenerationTask
 from src.concurrency import init_controller
-from src.interactor import interactive_asset_injection, show_task_summary, interactive_resolution_override
+from src.interactor import (
+    interactive_asset_injection, 
+    show_task_summary, 
+    interactive_resolution_override,
+    interactive_image_injection,
+    save_tasks_to_json
+)
 
 # Setup Rich Console
 console = Console()
@@ -82,10 +88,20 @@ def run_wizard_mode(args):
             tasks = temp_tasks
             break
             
-    # --- Step 2: Optional Pre-processing (Character ID & Resolution) ---
+    # --- Step 2: Pre-processing (Character ID & Resolution & Image Injection) ---
     console.print("\n[bold cyan]2. 任务预处理 (Pre-process)[/bold cyan]")
+    
+    # 2.1 Character ID
     interactive_asset_injection(tasks)
+    
+    # 2.2 Resolution
     interactive_resolution_override(tasks)
+    
+    # 2.3 Start Frame Injection (COS Upload)
+    interactive_image_injection(tasks)
+    
+    # 2.4 Save Changes
+    save_tasks_to_json(tasks)
     
     # --- Step 3: Output Configuration ---
     console.print("\n[bold cyan]3. 结果保存配置 (Output Configuration)[/bold cyan]")

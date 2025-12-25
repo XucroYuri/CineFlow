@@ -1,11 +1,14 @@
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from collections import Counter
 import re
+import json
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
 from rich.panel import Panel
 from .models import GenerationTask
+from .asset_manager import AssetManager
+from .storage import TencentCOSClient
 
 console = Console()
 
@@ -156,6 +159,152 @@ def interactive_asset_injection(tasks: List[GenerationTask]):
 
     console.print("[dim]角色 ID 注入完成。[/dim]\n")
 
+def interactive_image_injection(tasks: List[GenerationTask]):
+    """
+    Scans for local start frame images in asset/segment/, uploads them to COS, 
+    and updates the JSON image_url field.
+    """
+    console.print(Panel("🖼️  参考图注入检查 (Start Frame Injection)", style="cyan"))
+    
+    # Check if COS is configured
+    try:
+        cos_client = TencentCOSClient()
+        if not cos_client.enabled:
+            console.print("[yellow]未检测到腾讯云 COS 配置，跳过图片上传步骤。[/yellow]")
+            return
+    except Exception as e:
+        console.print(f"[red]COS 客户端初始化失败: {e}[/red]")
+        return
+
+    console.print("此步骤将扫描 'asset/segment/' 目录下的起始帧图片，并上传至对象存储。")
+    if not Confirm.ask("是否开始扫描并上传?", default=True):
+        return
+
+    # 1. Identify unique segments
+    # Use a dict to map (source_file, segment_index) -> task (representative)
+    unique_segments = {}
+    for t in tasks:
+        key = (t.source_file, t.segment.segment_index)
+        if key not in unique_segments:
+            unique_segments[key] = t
+
+    processed_count = 0
+    uploaded_count = 0
+    
+    with console.status("[bold green]正在处理图片...[/bold green]"):
+        for (source_file, seg_idx), task in unique_segments.items():
+            asset_mgr = AssetManager(source_file)
+            
+            # Look for start image (e.g., 1_start.png)
+            start_img_path = asset_mgr.get_segment_image(seg_idx, "start")
+            
+            if start_img_path:
+                console.print(f"\n[cyan]发现本地图片[/cyan]: {start_img_path.name} (Segment {seg_idx})")
+                
+                # Check existing URL
+                existing_url = task.segment.image_url
+                should_upload = True
+                
+                if existing_url:
+                    console.print(f"  [dim]当前 image_url: {existing_url}[/dim]")
+                    # If it looks like a COS URL we just uploaded, maybe skip?
+                    # For now, simplistic check: prompt user
+                    should_upload = Confirm.ask(f"  Segment {seg_idx} 已存在链接，是否上传本地图片并覆盖?", default=False)
+                
+                if should_upload:
+                    # Upload
+                    url = cos_client.upload_file(start_img_path)
+                    if url:
+                        # Update all tasks sharing this segment
+                        # (Since they share the same Segment object instance usually, 
+                        # but let's be safe and iterate 'tasks' to match)
+                        
+                        # Note: In Python, if 'task.segment' references the same object, one update is enough.
+                        # We verify this in models.py logic, but typically scanner creates one Segment object per JSON entry.
+                        task.segment.image_url = url
+                        uploaded_count += 1
+                        console.print(f"  [green]✔ 更新成功:[/green] {url}")
+                    else:
+                        console.print(f"  [red]✘ 上传失败[/red]")
+                else:
+                    console.print("  [dim]⏭ 跳过[/dim]")
+                    
+                processed_count += 1
+
+    console.print(f"\n[bold]处理完成[/bold]: 扫描 {processed_count} 个本地资产，上传更新 {uploaded_count} 个。")
+    console.print("[dim]注意: 更改已应用到内存，将在下一步保存到 JSON 文件。[/dim]\n")
+
+def save_tasks_to_json(tasks: List[GenerationTask]):
+    """
+    Persists changes (Prompt, Asset, Image URL) back to the source JSON files.
+    """
+    console.print(Panel("💾 保存更改 (Save Changes)", style="cyan"))
+    
+    # Group by file
+    files_map = {}
+    for t in tasks:
+        if t.source_file not in files_map:
+            files_map[t.source_file] = []
+        files_map[t.source_file].append(t)
+        
+    updated_files = 0
+    
+    with console.status("[bold green]正在写入 JSON 文件...[/bold green]"):
+        for source_file, task_list in files_map.items():
+            try:
+                # Read original to preserve _comment and structure
+                with open(source_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Update segments
+                # We need to map task data back to data['segments']
+                # Create a map of segment_index -> Segment Object (from tasks)
+                # Since all tasks for segment X share the same updated Segment object
+                seg_map = {t.segment.segment_index: t.segment for t in task_list}
+                
+                changed = False
+                for seg_dict in data.get("segments", []):
+                    idx = seg_dict.get("segment_index")
+                    if idx in seg_map:
+                        updated_seg_obj = seg_map[idx]
+                        
+                        # Check specific fields we modify: prompt_text, asset, image_url, resolution
+                        
+                        # 1. Prompt
+                        if seg_dict.get("prompt_text") != updated_seg_obj.prompt_text:
+                            seg_dict["prompt_text"] = updated_seg_obj.prompt_text
+                            changed = True
+                            
+                        # 2. Asset
+                        # Convert pydantic model back to dict
+                        new_asset = updated_seg_obj.asset.model_dump()
+                        if seg_dict.get("asset") != new_asset:
+                            seg_dict["asset"] = new_asset
+                            changed = True
+                            
+                        # 3. Image URL
+                        if seg_dict.get("image_url") != updated_seg_obj.image_url:
+                            seg_dict["image_url"] = updated_seg_obj.image_url
+                            changed = True
+
+                        # 4. Resolution
+                        if seg_dict.get("resolution") != updated_seg_obj.resolution:
+                            seg_dict["resolution"] = updated_seg_obj.resolution
+                            changed = True
+
+                if changed:
+                    with open(source_file, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    updated_files += 1
+                    
+            except Exception as e:
+                console.print(f"[red]保存失败 {source_file.name}: {e}[/red]")
+
+    if updated_files > 0:
+        console.print(f"[green]已更新 {updated_files} 个 JSON 文件。[/green]\n")
+    else:
+        console.print("[dim]没有文件需要更新。[/dim]\n")
+
 def _parse_name_and_id(char_str: str):
     """
     Extracts name and ID from various formats:
@@ -171,7 +320,8 @@ def _parse_name_and_id(char_str: str):
     # "Name@ID" split '@' gives "Name" and "ID"
     
     # Try regex for the cleaner "Name (@ID)" pattern first
-    match_paren = re.search(r'^(.*?)\s*\(@([^)]+)\)\s*$', char_str)
+    match_paren = re.search(r'^(.*?)\s*\(@([^)]+)\)\s*
+, char_str)
     if match_paren:
         name = match_paren.group(1).strip()
         raw_id = match_paren.group(2).strip()
@@ -239,4 +389,4 @@ def _apply_id_injection(tasks: List[GenerationTask], name: str, char_id: str):
         console.print(f" -> [green]已更新 {replaced_count} 处 Prompt (ID: {char_id})。[/green]")
     else:
         # If we didn't update prompt (maybe name not in text), but we updated asset list
-        console.print(f" -> [green]已更新关联资产定义 (ID: {char_id})。[/green]")
+        console.print(f" -> [green]已更新关联资产定义 (ID: {char_id}) 。[/green]")

@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     DEFAULT_INPUT_DIR: Path = PROJECT_ROOT / "input"
     DEFAULT_OUTPUT_DIR: Path = PROJECT_ROOT / "output"
 
+    # Tencent COS (Optional)
+    COS_SECRET_ID: Optional[str] = Field(None, env="COS_SECRET_ID")
+    COS_SECRET_KEY: Optional[str] = Field(None, env="COS_SECRET_KEY")
+    COS_REGION: Optional[str] = Field(None, env="COS_REGION")
+    COS_BUCKET: Optional[str] = Field(None, env="COS_BUCKET")
+    COS_CUSTOM_DOMAIN: Optional[str] = Field(None, env="COS_CUSTOM_DOMAIN")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
